@@ -175,6 +175,20 @@ function checkScreenshotFiles(dir: string, shots: string[]): string | null {
   return null;
 }
 
+/** The outputs must exist and be non-empty after they are written. */
+function checkWritten(out: string): string | null {
+  for (const name of ['board.json', 'data.js', 'dossier.json']) {
+    const path = join(out, name);
+    if (!existsSync(path)) {
+      return `${name} was not written to ${out}`;
+    }
+    if (statSync(path).size === 0) {
+      return `${name} was written empty`;
+    }
+  }
+  return null;
+}
+
 /** Write the dossier last: the scorer rebuilds it from this /output and compares bytes. */
 function writeDossier(out: string): void {
   writeFileSync(
@@ -217,6 +231,10 @@ function main(): void {
     fail(shotsIssue, 1);
   }
   writeDossier(out);
+  const writtenIssue = checkWritten(out);
+  if (writtenIssue !== null) {
+    fail(writtenIssue, 1);
+  }
   report(snapshot, board, radar, out, shots);
 }
 
