@@ -26,33 +26,89 @@ const TEXT_MAX_BYTES = 65_536;
 const SCREENSHOT_CAPS = { max: 4, max_bytes: 524_288 };
 const IMAGE_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$/;
 
+/** The board the gate accepts: at least 100 rows, at most 4000, farm plans of 3 to 12 steps. */
+const BOARD_MIN_ROWS = 100;
+const BOARD_MAX_ROWS = 4000;
+const FARM_MIN_STEPS = 3;
+const FARM_MAX_STEPS = 12;
+
+/** The dashboard the run must copy: three files, no more, no fewer. */
+const DASHBOARD_FILES = ['index.html', 'app.css', 'app.js'];
+
+/** The screenshots the run must hand in: the board, a detail view and a filtered view. */
+const SCREENSHOT_MIN = 3;
+
+/** Print a failure to stderr and stop with the given code. */
+function fail(message: string, code: number): never {
+  process.stderr.write(`token radar: ${message}\n`);
+  process.exit(code);
+}
+
 /** --name <value> out of the arguments, or the fallback. */
 function arg(name: string, fallback: string): string {
   const at = process.argv.indexOf(`--${name}`);
   if (at >= 0 && at + 1 < process.argv.length) return process.argv[at + 1]!;
   const withEquals = process.argv.find((a) => a.startsWith(`--${name}=`));
-  return withEquals === undefined ? fallback : withEquals.slice(name.length + 3);
+  if (withEquals === undefined) return fallback;
+  return withEquals.slice(name.length + 3);
 }
 
-const inputArg = arg('input', '/input');
-const inputFile = inputArg.endsWith('.json') ? inputArg : join(inputArg, 'snapshot.json');
-if (!existsSync(inputFile)) {
-  process.stderr.write(`token radar: no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input\n`);
-  process.exit(2);
-}
-const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
-
-const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
-const { board, radar } = buildRadar(snapshot);
-const issue = boardIssue(board, snapshot);
-if (issue !== null) {
-  process.stderr.write(`token radar: the model wrote a board the gate refuses: ${issue}\n`);
-  process.exit(1);
+/** Turn --input <snapshot.json|directory> into the snapshot file to read. */
+function resolveInputFile(inputArg: string): string {
+  if (inputArg.endsWith('.json')) return inputArg;
+  return join(inputArg, 'snapshot.json');
 }
 
-mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
-writeFileSync(join(out, 'data.js'), dataScript(radar));
+/** Read and parse the sealed snapshot, or stop with the path that was missing. */
+function loadSnapshot(inputFile: string) {
+  if (!existsSync(inputFile)) {
+    fail(
+      `no snapshot at ${inputFile}: pass --input <snapshot.json|directory> or mount the sealed /input`,
+      2,
+    );
+  }
+  return parseSnapshot(readFileSync(inputFile, 'utf8'));
+}
+
+/** The board must be ranked, strictly descending by implied value, before it is written. */
+function checkBoardRanked(board: Array<{ implied_value_usd: number }>): string | null {
+  for (let i = 1; i < board.length; i += 1) {
+    if (board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) {
+      return `row ${i + 1} outranks row ${i}: the board is not sorted by implied value`;
+    }
+  }
+  return null;
+}
+
+/** Every row's farm plan must hold 3 to 12 steps, each 20 to 600 characters. */
+function checkFarmPlans(board: Array<{ slug: string; farm_steps: string[] }>): string | null {
+  for (const row of board) {
+    if (row.farm_steps.length < FARM_MIN_STEPS || row.farm_steps.length > FARM_MAX_STEPS) {
+      return `${row.slug} has ${row.farm_steps.length} farm steps, not ${FARM_MIN_STEPS} to ${FARM_MAX_STEPS}`;
+    }
+    for (const step of row.farm_steps) {
+      if (step.length < 20 || step.length > 600) {
+        return `${row.slug} has a farm step of ${step.length} characters, not 20 to 600`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Refuse a board the gate would refuse, before anything is written. */
+function checkBoard(board: Array<{ implied_value_usd: number; slug: string; farm_steps: string[] }>): string | null {
+  if (board.length < BOARD_MIN_ROWS || board.length > BOARD_MAX_ROWS) {
+    return `the board has ${board.length} rows, not ${BOARD_MIN_ROWS} to ${BOARD_MAX_ROWS}`;
+  }
+  return checkBoardRanked(board) ?? checkFarmPlans(board);
+}
+
+/** Write the ranked board and the dashboard's data script. */
+function writeBoardAndData(out: string, board: unknown, radar: Parameters<typeof dataScript>[0]): void {
+  mkdirSync(out, { recursive: true });
+  writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
+  writeFileSync(join(out, 'data.js'), dataScript(radar));
+}
 
 /** Copy one directory's regular files into `to`, skipping names that start with a dot. */
 function copyFiles(from: string, to: string): string[] {
@@ -69,23 +125,72 @@ function copyFiles(from: string, to: string): string[] {
   return copied;
 }
 
-copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
-const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-if (shots.length < 3) {
-  process.stderr.write(`token radar: screenshots/ holds ${shots.length} image${shots.length === 1 ? '' : 's'}: hand in 3, the board, a detail view and a filtered view\n`);
-  process.exit(1);
-}
-for (const name of shots) {
-  if (!IMAGE_NAME.test(name)) {
-    process.stderr.write(`token radar: screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters\n`);
-    process.exit(1);
+/** The dashboard must arrive whole: index.html, app.css and app.js, all three. */
+function checkDashboard(copied: string[]): string | null {
+  const missing = DASHBOARD_FILES.filter((name) => !copied.includes(name));
+  if (missing.length > 0) {
+    return `dashboard/ is missing ${missing.join(', ')}: the page needs all three files`;
   }
+  return null;
 }
 
-// The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
-writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: { max_files: 400, max_bytes: 4_194_304 } }));
+/** The screenshots must be three or four well-named images. */
+function checkScreenshots(shots: string[]): string | null {
+  if (shots.length < SCREENSHOT_MIN) {
+    const plural = shots.length === 1 ? '' : 's';
+    return `screenshots/ holds ${shots.length} image${plural}: hand in 3, the board, a detail view and a filtered view`;
+  }
+  for (const name of shots) {
+    if (!IMAGE_NAME.test(name)) {
+      return `screenshots/${name}: a name is letters, digits and . _ -, 1 to 128 characters`;
+    }
+  }
+  return null;
+}
 
-process.stdout.write(
-  `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
-);
+/** Write the dossier last: the scorer rebuilds it from this /output and compares bytes. */
+function writeDossier(out: string): void {
+  writeFileSync(
+    join(out, 'dossier.json'),
+    buildDossier(out, {
+      text_max_bytes: TEXT_MAX_BYTES,
+      screenshots: SCREENSHOT_CAPS,
+      dashboard: { max_files: 400, max_bytes: 4_194_304 },
+    }),
+  );
+}
+
+/** Report the run the way the starter did, so logs stay comparable. */
+function report(snapshot: { protocols: unknown[]; watchlist: unknown[] }, board: unknown[], radar: { early_size: number; live_size: number }, out: string, shots: string[]): void {
+  process.stdout.write(
+    `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+      `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+  );
+}
+
+/** Score the snapshot, check the board, and write the whole output directory. */
+function main(): void {
+  const inputFile = resolveInputFile(arg('input', '/input'));
+  const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
+  const snapshot = loadSnapshot(inputFile);
+  const { board, radar } = buildRadar(snapshot);
+  const issue = boardIssue(board, snapshot) ?? checkBoard(board);
+  if (issue !== null) {
+    fail(`the model wrote a board the gate refuses: ${issue}`, 1);
+  }
+  writeBoardAndData(out, board, radar);
+  const dashboard = copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
+  const dashboardIssue = checkDashboard(dashboard);
+  if (dashboardIssue !== null) {
+    fail(dashboardIssue, 1);
+  }
+  const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
+  const shotsIssue = checkScreenshots(shots);
+  if (shotsIssue !== null) {
+    fail(shotsIssue, 1);
+  }
+  writeDossier(out);
+  report(snapshot, board, radar, out, shots);
+}
+
+main();

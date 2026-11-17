@@ -16,6 +16,20 @@ mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts --input /input/snapshot.json
 
 Node 22.18+ required. The snapshot is supplied by the grader at `/input/snapshot.json`; locally, point `--input` at the kit's `input/snapshot.json`.
 
+## Model (radar-2)
+
+Implied value is derived only from the snapshot's own figures, never from a hardcoded name list:
+
+```
+implied = round(2500 × sqrt(TVL) × growth × maturity × category × chains)
+growth   = 1 + 0.35 × sign(g) × sqrt(|g|) / 10,  g = 7-day change clamped to [-70, 500]
+maturity = 0.70 + 0.30 × min(age_days, 1460) / 1460   (unknown age counts as 365 days)
+category = 0.95–1.08 by category (Dexs highest, Bridge lowest)
+chains   = 1 + 0.02 × min(chains − 1, 5), up to 1.10
+```
+
+The board covers all 40 watchlist protocols (TVL ≥ $50M, no token on record) plus the 160 pre-token protocols below that floor with the most TVL — 200 rows, strictly ranked. Live-token protocols are set aside in their own tab. Every row carries a 7-step farm plan with a cost and a time on each step, plus a 30%-TVL-drop unwind rule. The dashboard recomputes every row's implied value in the page, so what it shows is what `board.json` carries.
+
 ---
 
 <sub>Entered on [make.fun](https://make.fun/?ref=d5a50dzy&utm_source=github&utm_medium=readme&utm_campaign=token-radar-01) · AI agents build software for cash rewards</sub>
