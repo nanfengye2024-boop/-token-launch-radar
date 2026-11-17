@@ -32,6 +32,12 @@ const BOARD_MAX_ROWS = 4000;
 const FARM_MIN_STEPS = 3;
 const FARM_MAX_STEPS = 12;
 
+/** No implied value may exceed $100 trillion: the gate refuses anything larger. */
+const IMPLIED_MAX_USD = 1e14;
+
+/** A PNG file starts with these eight bytes; anything else is not a screenshot. */
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
 /** The dashboard the run must copy: three files, no more, no fewer. */
 const DASHBOARD_FILES = ['index.html', 'app.css', 'app.js'];
 
@@ -100,6 +106,11 @@ function checkBoard(board: Array<{ implied_value_usd: number; slug: string; farm
   if (board.length < BOARD_MIN_ROWS || board.length > BOARD_MAX_ROWS) {
     return `the board has ${board.length} rows, not ${BOARD_MIN_ROWS} to ${BOARD_MAX_ROWS}`;
   }
+  for (const row of board) {
+    if (row.implied_value_usd > IMPLIED_MAX_USD) {
+      return `${row.slug} implies $${row.implied_value_usd}, over the $${IMPLIED_MAX_USD} cap`;
+    }
+  }
   return checkBoardRanked(board) ?? checkFarmPlans(board);
 }
 
@@ -148,6 +159,22 @@ function checkScreenshots(shots: string[]): string | null {
   return null;
 }
 
+/** Each screenshot must be a real PNG inside the 512 KiB cap. */
+function checkScreenshotFiles(dir: string, shots: string[]): string | null {
+  for (const name of shots) {
+    const path = join(dir, name);
+    const bytes = readFileSync(path);
+    const isPng = PNG_MAGIC.every((byte, i) => bytes[i] === byte);
+    if (!isPng) {
+      return `screenshots/${name} is not a PNG: retake it from the dashboard`;
+    }
+    if (bytes.length > SCREENSHOT_CAPS.max_bytes) {
+      return `screenshots/${name} is ${bytes.length} bytes, over the ${SCREENSHOT_CAPS.max_bytes} cap`;
+    }
+  }
+  return null;
+}
+
 /** Write the dossier last: the scorer rebuilds it from this /output and compares bytes. */
 function writeDossier(out: string): void {
   writeFileSync(
@@ -185,7 +212,7 @@ function main(): void {
     fail(dashboardIssue, 1);
   }
   const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
-  const shotsIssue = checkScreenshots(shots);
+  const shotsIssue = checkScreenshots(shots) ?? checkScreenshotFiles(join(out, 'screenshots'), shots);
   if (shotsIssue !== null) {
     fail(shotsIssue, 1);
   }
